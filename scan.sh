@@ -16,9 +16,16 @@ print_banner() {
     echo -e "${NC}"
 }
 
-# Error handling
+# Error handling function
+handle_error() {
+    local line_no=$1
+    echo -e "${RED}Error occurred in script at line: ${line_no}${NC}" >&2
+    exit 1
+}
+
+# Set up error handling
 set -e
-trap 'echo -e "${RED}Error: Command failed at line $LINENO${NC}" >&2' ERR
+trap 'handle_error ${LINENO}' ERR
 
 # Function to validate URLs
 validate_url() {
@@ -34,7 +41,7 @@ scan_url() {
     local url="$1"
     local temp_dir="$2"
     local output_dir="$3"
-    local timestamp=$(date +%s)
+    local timestamp=$(date +%Y%m%d_%H%M%S)
     
     echo -e "${YELLOW}Scanning: $url${NC}"
     
@@ -45,7 +52,10 @@ scan_url() {
     local sendgrid_keys="$temp_dir/sendgrid_keys_$scan_id.txt"
     
     # Extract JavaScript files
-    curl -sL "$url" | grep -Eo 'src="[^"]*\.js"' | cut -d'"' -f2 > "$js_files"
+    if ! curl -sL "$url" | grep -Eo 'src="[^"]*\.js"' | cut -d'"' -f2 > "$js_files"; then
+        echo -e "${RED}Failed to fetch JavaScript files from $url${NC}"
+        return 1
+    fi
     
     # Process each JavaScript file
     while read -r js_file; do
@@ -60,18 +70,22 @@ scan_url() {
         
         echo -e "${BLUE}Analyzing: $js_file${NC}"
         
-        # Download and scan JS file
-        curl -sL "$js_file" 2>/dev/null | {
+        # Download and scan JS file with timeout
+        if curl -sL --max-time 10 "$js_file" 2>/dev/null | {
             # Look for AWS keys
             grep -E "AKIA[A-Z0-9]{16}" > >(tee -a "$aws_keys") || true
             # Look for SendGrid keys
             grep -E "SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}" > >(tee -a "$sendgrid_keys") || true
-        }
+        }; then
+            echo -e "${GREEN}Successfully analyzed $js_file${NC}"
+        else
+            echo -e "${YELLOW}Warning: Failed to analyze $js_file${NC}"
+        fi
     done < "$js_files"
     
     # Save results if keys were found
     if [[ -s "$aws_keys" || -s "$sendgrid_keys" ]]; then
-        local result_file="$output_dir/scan_${scan_id}_$(date +%Y%m%d_%H%M%S).txt"
+        local result_file="$output_dir/scan_${scan_id}_${timestamp}.txt"
         {
             echo "Scan Results for $url"
             echo "Timestamp: $(date)"
@@ -87,7 +101,7 @@ scan_url() {
         } > "$result_file"
         echo -e "${GREEN}Keys found! Results saved to: $result_file${NC}"
     else
-        echo -e "${GREEN}No keys found.${NC}"
+        echo -e "${GREEN}No keys found in $url${NC}"
     fi
 }
 
@@ -102,11 +116,11 @@ main() {
     fi
     
     local url_file="$1"
-    local threads=${2:-10}  # Default to 10 threads
+    local threads=${2:-5}  # Default to 5 threads if not specified
     
     # Validate input file
     if [ ! -f "$url_file" ]; then
-        echo -e "${RED}Error: URL file not found${NC}"
+        echo -e "${RED}Error: URL file not found: $url_file${NC}"
         exit 1
     fi
     
@@ -120,7 +134,7 @@ main() {
     local total_urls=$(wc -l < "$url_file")
     echo -e "${BLUE}Starting scan of $total_urls URLs using $threads threads${NC}"
     
-    # Process URLs in parallel
+    # Process URLs in parallel using xargs
     export -f scan_url
     export -f validate_url
     export RED GREEN BLUE YELLOW NC
@@ -134,4 +148,5 @@ main() {
     echo -e "${GREEN}Scan complete! Results are in: $output_dir${NC}"
 }
 
+# Execute main function with all arguments
 main "$@"
